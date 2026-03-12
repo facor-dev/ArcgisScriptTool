@@ -1,0 +1,203 @@
+# -*- coding: utf-8 -*-
+import arcpy
+import os
+from datetime import datetime, time
+
+#--------------------------------------------------------------------------------------------------#
+
+def normalizar_presion(valor):
+    if not valor:
+        return None
+    valor = valor.strip().upper()
+    if valor == "AP":
+        # return "Alta Presión"
+        return "50000"
+    if valor == "MP":
+        # return "Media Presión"
+        return "5000"
+    raise ValueError("El parámetro Presion debe ser 'AP' o 'MP'.")
+
+def normalizar_zona(valor):
+    if not valor:
+        return None
+    v = valor.strip().lower()
+    if v == "zona comercial":
+        return "ZONA COMERCIAL"
+    if v == "zona no comercial":
+        return "ZONA NO COMERCIAL"
+    raise ValueError("El parámetro Zona debe ser 'Zona comercial' o 'Zona no comercial'.")
+
+def obtener_datetime_inicio(fecha):
+    return datetime.combine(fecha.date(), time.min)
+
+def obtener_datetime_fin(fecha):
+    return datetime.combine(fecha.date(), time.max)
+
+def chunks(lista, size):
+    for i in range(0, len(lista), size):
+        yield lista[i:i + size]
+
+def sql_in_text(field_name, values):
+    valores = []
+    for v in values:
+        texto = str(v).replace("'", "''")
+        valores.append(f"'{texto}'")
+    return f"{field_name} IN ({', '.join(valores)})"
+
+def crear_tabla_salida(workspace, nombre_tabla):
+    salida = os.path.join(workspace, nombre_tabla)
+    if arcpy.Exists(salida):
+        arcpy.management.Delete(salida)
+    carpeta = os.path.dirname(salida)
+    nombre = os.path.basename(salida)
+    arcpy.management.CreateTable(carpeta, nombre)
+    arcpy.management.AddField(salida, "ID_PLANCHETA", "TEXT", field_length=100)
+    arcpy.management.AddField(salida, "ZONA", "TEXT", field_length=50)
+    arcpy.management.AddField(salida, "FECHA_INICIO", "DATE")
+    arcpy.management.AddField(salida, "FECHA_FIN", "DATE")
+    arcpy.management.AddField(salida, "PRESION", "TEXT", field_length=5)
+    arcpy.management.AddField(salida, "CANT_OTS", "LONG")
+    arcpy.management.AddField(salida, "SUMA_LONGITUD", "DOUBLE")
+    arcpy.management.AddField(salida, "CANT_FUGAS", "LONG")
+    arcpy.management.AddField(salida, "CANT_FUGAS_TE", "LONG")
+    return salida
+#--------------------------------------------------------------------------------------------------#
+def main():
+    arcpy.env.overwriteOutput = True
+    
+    # Parámetros de entrada
+    planchetas = arcpy.GetParameter(0)              # Planchetas
+    presion = arcpy.GetParameterAsText(1)           # Presion
+    zona = arcpy.GetParameterAsText(2)              # Zona
+    fecha_inicio = arcpy.GetParameter(3)            # Fecha_Inicio
+    fecha_fin = arcpy.GetParameter(4)               # Fecha_Fin
+    ots_relevadas = arcpy.GetParameter(5)           # OTs_Relevadas
+    fugas = arcpy.GetParameter(6)                   # Fugas
+    
+    #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
+    arcpy.AddMessage("tipo planchetas: " + str(type(planchetas)))
+    arcpy.AddMessage("repr planchetas: " + str(planchetas))
+    #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
+
+    planchetas_tmp = os.path.join(arcpy.env.scratchGDB, "planchetas_input")
+    if arcpy.Exists(planchetas_tmp):
+        arcpy.management.Delete(planchetas_tmp)
+        
+    arcpy.management.CopyFeatures(planchetas, planchetas_tmp)
+        # Transformo los datos de seleccion a un Feature Layer por si vienen 
+        # en otro formato (Feature Set) que no funcione en Experience Builder
+    
+    escala_objetivo = normalizar_presion(presion)
+    zona_objetivo = normalizar_zona(zona)
+    if fecha_inicio is None or fecha_fin is None:
+        raise ValueError("Fecha Inicio y Fecha Fin son obligatorias.")
+    dt_inicio = obtener_datetime_inicio(fecha_inicio)
+    dt_fin = obtener_datetime_fin(fecha_fin)
+    if dt_inicio > dt_fin:
+        raise ValueError("Fecha Inicio no puede ser mayor que Fecha Fin.")
+    arcpy.AddMessage("Leyendo planchetas seleccionadas...")
+    
+    # 1) Obtener las planchetas seleccionadas y filtrar por ESCALA
+    planchetas_ids = set()
+    campos_planchetas = ["ID_PLANCHETA", "ESCALA"]
+    with arcpy.da.SearchCursor(planchetas_tmp, campos_planchetas) as cursor:
+        for id_plancheta, escala in cursor:
+            if escala == escala_objetivo:
+                if id_plancheta is not None:
+                    planchetas_ids.add(str(id_plancheta))
+    if not planchetas_ids:
+        raise ValueError("No hay planchetas seleccionadas que coincidan con la presión indicada.")
+    arcpy.AddMessage(f"Planchetas válidas: {len(planchetas_ids)}")
+    # Estructura de acumulación por plancheta
+    resumen = {}
+    for pid in planchetas_ids:
+        resumen[pid] = {
+            "cantidad_ots": 0,
+            "suma_longitud": 0.0,
+            "cantidad_fugas": 0,
+            "cantidad_fugas_te": 0
+        }
+    
+    # 2) Leer OTs Relevadas relacionadas, filtrar por zona y fecha
+    arcpy.AddMessage("Procesando OTs Relevadas...")
+    # Mapa: ID_RESEGUIMIENTO -> ID_PLANCHETA
+    reseg_a_plancheta = {}
+    campos_ots = ["ID", "ID_PLANCHETA", "CODIGO_LOCALIDAD", "LONGITUD", "FECHA_REL"]
+    # Para evitar where muy largo, procesamos las planchetas en bloques
+    for bloque_planchetas in chunks(list(planchetas_ids), 200):
+        where_ots = sql_in_text("ID_PLANCHETA", bloque_planchetas)
+        with arcpy.da.SearchCursor(ots_relevadas, campos_ots, where_clause=where_ots) as cursor:
+            for id_reseguimiento, id_plancheta, codigo_localidad, longitud, fecha_rel in cursor:
+                if id_plancheta is None or id_reseguimiento is None or fecha_rel is None:
+                    continue
+                id_plancheta = str(id_plancheta)
+                id_reseguimiento = str(id_reseguimiento)
+                if codigo_localidad != zona_objetivo:
+                    continue
+                if not (dt_inicio <= fecha_rel <= dt_fin):
+                    continue
+                resumen[id_plancheta]["cantidad_ots"] += 1
+                resumen[id_plancheta]["suma_longitud"] += float(longitud) if longitud is not None else 0.0
+                reseg_a_plancheta[id_reseguimiento] = id_plancheta
+    arcpy.AddMessage(f"OTs filtradas: {len(reseg_a_plancheta)}")
+    
+    # 3) Leer Fugas relacionadas a las OTs filtradas
+    if reseg_a_plancheta:
+        arcpy.AddMessage("Procesando Fugas...")
+        # campos_fugas = ["ID_RESEGUIMIENTO", "TIEMPO_ESPERA"]
+        campos_fugas = ["ID_RESEGUIMIENTO"] #reemplaza lo dearriba, hasta que se ponga el campo de tiempo de espera en la tabla de fugas
+        reseguimientos_ids = list(reseg_a_plancheta.keys())
+        for bloque_reseg in chunks(reseguimientos_ids, 200):
+            where_fugas = sql_in_text("ID_RESEGUIMIENTO", bloque_reseg)
+            with arcpy.da.SearchCursor(fugas, campos_fugas, where_clause=where_fugas) as cursor:
+                # for id_reseguimiento, tiempo_espera in cursor:
+                for (id_reseguimiento,) in cursor: #reemplaza lo de arriba, hasta que se ponga el campo de tiempo de espera en la tabla de fugas
+                    if id_reseguimiento is None:
+                        continue
+                    id_reseguimiento = str(id_reseguimiento)
+                    id_plancheta = reseg_a_plancheta.get(id_reseguimiento)
+                    if id_plancheta is None:
+                        continue
+                    resumen[id_plancheta]["cantidad_fugas"] += 1
+                    # if tiempo_espera in (True, 1, "1", "true", "True", "TRUE"):
+                    #     resumen[id_plancheta]["cantidad_fugas_te"] += 1
+                    resumen[id_plancheta]["cantidad_fugas_te"] += 1 # reemplaza las dos lineas de arriba hasta que se ponga el campo tiempo de espera en la tabla de fugas
+                    
+    # 4) Crear tabla de salida en scratchGDB
+    arcpy.AddMessage("Creando tabla de salida...")
+    scratch_gdb = arcpy.env.scratchGDB
+    nombre_tabla = "resultado_planchetas"
+    tabla_salida = crear_tabla_salida(scratch_gdb, nombre_tabla)
+    campos_insert = [
+        "ID_PLANCHETA",
+        "ZONA",
+        "FECHA_INICIO",
+        "FECHA_FIN",
+        "PRESION",
+        "CANT_OTS",
+        "SUMA_LONGITUD",
+        "CANT_FUGAS",
+        "CANT_FUGAS_TE"
+    ]
+    with arcpy.da.InsertCursor(tabla_salida, campos_insert) as cursor:
+        for id_plancheta in sorted(resumen.keys()):
+            item = resumen[id_plancheta]
+            cursor.insertRow([
+                id_plancheta,
+                zona,
+                dt_inicio,
+                dt_fin,
+                presion,
+                item["cantidad_ots"],
+                item["suma_longitud"],
+                item["cantidad_fugas"],
+                item["cantidad_fugas_te"]
+            ])
+    arcpy.AddMessage(f"Tabla generada: {tabla_salida}")
+    # Devolver salida
+    arcpy.SetParameterAsText(7, tabla_salida)   # Parámetro de salida
+                                                # Se asume un parámetro 7 para devolver la tabla creada
+
+#--------------------------------------------------------------------------------------------------#
+if __name__ == "__main__":
+    main()
