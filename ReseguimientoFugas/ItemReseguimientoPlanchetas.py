@@ -4,7 +4,6 @@ import os
 from datetime import datetime, time
 
 #--------------------------------------------------------------------------------------------------#
-
 def normalizar_presion(valor):
     if not valor:
         return None
@@ -61,10 +60,10 @@ def crear_tabla_salida(workspace, nombre_tabla):
     arcpy.management.AddField(salida, "CANT_FUGAS", "LONG")
     arcpy.management.AddField(salida, "CANT_FUGAS_TE", "LONG")
     return salida
+
 #--------------------------------------------------------------------------------------------------#
 def main():
-    arcpy.env.overwriteOutput = True
-    
+    arcpy.env.overwriteOutput = True    
     # Parámetros de entrada
     planchetas = arcpy.GetParameter(0)              # Planchetas
     presion = arcpy.GetParameterAsText(1)           # Presion
@@ -72,20 +71,19 @@ def main():
     fecha_inicio = arcpy.GetParameter(3)            # Fecha_Inicio
     fecha_fin = arcpy.GetParameter(4)               # Fecha_Fin
     ots_relevadas = arcpy.GetParameter(5)           # OTs_Relevadas
-    fugas = arcpy.GetParameter(6)                   # Fugas
+    fugas = arcpy.GetParameter(6)                   # Fugas    
     
-    #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
-    arcpy.AddMessage("tipo planchetas: " + str(type(planchetas)))
-    arcpy.AddMessage("repr planchetas: " + str(planchetas))
-    #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
-
+    # #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
+    # arcpy.AddMessage("tipo planchetas: " + str(type(planchetas)))
+    # arcpy.AddMessage("repr planchetas: " + str(planchetas))
+    # #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
+    
     planchetas_tmp = os.path.join(arcpy.env.scratchGDB, "planchetas_input")
     if arcpy.Exists(planchetas_tmp):
         arcpy.management.Delete(planchetas_tmp)
-        
     arcpy.management.CopyFeatures(planchetas, planchetas_tmp)
         # Transformo los datos de seleccion a un Feature Layer por si vienen 
-        # en otro formato (Feature Set) que no funcione en Experience Builder
+        # en otro formato (Feature Set) que no funcione en Experience Builder    
     
     escala_objetivo = normalizar_presion(presion)
     zona_objetivo = normalizar_zona(zona)
@@ -95,7 +93,7 @@ def main():
     dt_fin = obtener_datetime_fin(fecha_fin)
     if dt_inicio > dt_fin:
         raise ValueError("Fecha Inicio no puede ser mayor que Fecha Fin.")
-    arcpy.AddMessage("Leyendo planchetas seleccionadas...")
+    arcpy.AddMessage("Leyendo planchetas seleccionadas...")    
     
     # 1) Obtener las planchetas seleccionadas y filtrar por ESCALA
     planchetas_ids = set()
@@ -108,6 +106,7 @@ def main():
     if not planchetas_ids:
         raise ValueError("No hay planchetas seleccionadas que coincidan con la presión indicada.")
     arcpy.AddMessage(f"Planchetas válidas: {len(planchetas_ids)}")
+    
     # Estructura de acumulación por plancheta
     resumen = {}
     for pid in planchetas_ids:
@@ -116,13 +115,14 @@ def main():
             "suma_longitud": 0.0,
             "cantidad_fugas": 0,
             "cantidad_fugas_te": 0
-        }
+        }    
     
     # 2) Leer OTs Relevadas relacionadas, filtrar por zona y fecha
     arcpy.AddMessage("Procesando OTs Relevadas...")
     # Mapa: ID_RESEGUIMIENTO -> ID_PLANCHETA
     reseg_a_plancheta = {}
     campos_ots = ["ID", "ID_PLANCHETA", "CODIGO_LOCALIDAD", "LONGITUD", "FECHA_REL"]
+    
     # Para evitar where muy largo, procesamos las planchetas en bloques
     for bloque_planchetas in chunks(list(planchetas_ids), 200):
         where_ots = sql_in_text("ID_PLANCHETA", bloque_planchetas)
@@ -139,7 +139,7 @@ def main():
                 resumen[id_plancheta]["cantidad_ots"] += 1
                 resumen[id_plancheta]["suma_longitud"] += float(longitud) if longitud is not None else 0.0
                 reseg_a_plancheta[id_reseguimiento] = id_plancheta
-    arcpy.AddMessage(f"OTs filtradas: {len(reseg_a_plancheta)}")
+    arcpy.AddMessage(f"OTs filtradas: {len(reseg_a_plancheta)}")    
     
     # 3) Leer Fugas relacionadas a las OTs filtradas
     if reseg_a_plancheta:
@@ -161,8 +161,8 @@ def main():
                     resumen[id_plancheta]["cantidad_fugas"] += 1
                     # if tiempo_espera in (True, 1, "1", "true", "True", "TRUE"):
                     #     resumen[id_plancheta]["cantidad_fugas_te"] += 1
-                    resumen[id_plancheta]["cantidad_fugas_te"] += 1 # reemplaza las dos lineas de arriba hasta que se ponga el campo tiempo de espera en la tabla de fugas
-                    
+                    resumen[id_plancheta]["cantidad_fugas_te"] += 1 # reemplaza las dos lineas de arriba hasta que se ponga el campo tiempo de espera en la tabla de fugas                    
+    
     # 4) Crear tabla de salida en scratchGDB
     arcpy.AddMessage("Creando tabla de salida...")
     scratch_gdb = arcpy.env.scratchGDB
@@ -194,10 +194,12 @@ def main():
                 item["cantidad_fugas_te"]
             ])
     arcpy.AddMessage(f"Tabla generada: {tabla_salida}")
+    
+    # Es una tabla temporal en scratchGDB. No se necesita un parametro de salida ya que no se va a guardar ni compartir, solo se devuelve la ruta para que Experience Builder la consuma directamente desde el scratchGDB. Si se quisiera guardar o compartir, se podría agregar un parámetro de salida y copiar la tabla allí si lo requieren.
     # Devolver salida
-    arcpy.SetParameterAsText(7, tabla_salida)   # Parámetro de salida
-                                                # Se asume un parámetro 7 para devolver la tabla creada
-
+    # arcpy.SetParameterAsText(7, tabla_salida)   # Parámetro de salida
+    #                                             # Se asume un parámetro 7 para devolver la tabla creada
+                                                
 #--------------------------------------------------------------------------------------------------#
 if __name__ == "__main__":
     main()
