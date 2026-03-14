@@ -67,11 +67,10 @@ def main():
     # Parámetros de entrada
     planchetas = arcpy.GetParameter(0)              # Planchetas
     presion = arcpy.GetParameterAsText(1)           # Presion
-    zona = arcpy.GetParameterAsText(2)              # Zona
-    fecha_inicio = arcpy.GetParameter(3)            # Fecha_Inicio
-    fecha_fin = arcpy.GetParameter(4)               # Fecha_Fin
-    ots_relevadas = arcpy.GetParameter(5)           # OTs_Relevadas
-    fugas = arcpy.GetParameter(6)                   # Fugas    
+    fecha_inicio = arcpy.GetParameter(2)            # Fecha_Inicio
+    fecha_fin = arcpy.GetParameter(3)               # Fecha_Fin
+    ots_relevadas = arcpy.GetParameter(4)           # OTs_Relevadas
+    fugas = arcpy.GetParameter(5)                   # Fugas    
     
     # #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
     # arcpy.AddMessage("tipo planchetas: " + str(type(planchetas)))
@@ -86,7 +85,6 @@ def main():
         # en otro formato (Feature Set) que no funcione en Experience Builder    
     
     escala_objetivo = normalizar_presion(presion)
-    zona_objetivo = normalizar_zona(zona)
     if fecha_inicio is None or fecha_fin is None:
         raise ValueError("Fecha Inicio y Fecha Fin son obligatorias.")
     dt_inicio = obtener_datetime_inicio(fecha_inicio)
@@ -107,17 +105,18 @@ def main():
         raise ValueError("No hay planchetas seleccionadas que coincidan con la presión indicada.")
     arcpy.AddMessage(f"Planchetas válidas: {len(planchetas_ids)}")
     
-    # Estructura de acumulación por plancheta
+    # Estructura de acumulación por plancheta y zona (inicializar con 0s para cada plancheta)
     resumen = {}
     for pid in planchetas_ids:
-        resumen[pid] = {
-            "cantidad_ots": 0,
-            "suma_longitud": 0.0,
-            "cantidad_fugas": 0,
-            "cantidad_fugas_te": 0
-        }    
-    
-    # 2) Leer OTs Relevadas relacionadas, filtrar por zona y fecha
+        for zona_calc in ["ZONA COMERCIAL", "ZONA NO COMERCIAL"]:
+            resumen[(pid, zona_calc)] = {
+                "cantidad_ots": 0,
+                "suma_longitud": 0.0,
+                "cantidad_fugas": 0,
+                "cantidad_fugas_te": 0
+            }
+
+    # 2) Leer OTs Relevadas relacionadas, filtrar por fecha (y agrupar por zona)
     arcpy.AddMessage("Procesando OTs Relevadas...")
     # Mapa: ID_RESEGUIMIENTO -> ID_PLANCHETA
     reseg_a_plancheta = {}
@@ -132,15 +131,31 @@ def main():
                     continue
                 id_plancheta = str(id_plancheta)
                 id_reseguimiento = str(id_reseguimiento)
-                if codigo_localidad != zona_objetivo:
-                    continue
                 if not (dt_inicio <= fecha_rel <= dt_fin):
                     continue
-                resumen[id_plancheta]["cantidad_ots"] += 1
-                resumen[id_plancheta]["suma_longitud"] += float(longitud) if longitud is not None else 0.0
-                reseg_a_plancheta[id_reseguimiento] = id_plancheta
+
+                try:
+                    zona_actual = normalizar_zona(codigo_localidad)
+                except ValueError:
+                    # Ignorar locales que no sean zona comercial/no comercial
+                    continue
+
+                clave = (id_plancheta, zona_actual)
+                if clave not in resumen:
+                    resumen[clave] = {
+                        "cantidad_ots": 0,
+                        "suma_longitud": 0.0,
+                        "cantidad_fugas": 0,
+                        "cantidad_fugas_te": 0
+                    }
+
+                resumen[clave]["cantidad_ots"] += 1
+                resumen[clave]["suma_longitud"] += float(longitud) if longitud is not None else 0.0
+                reseg_a_plancheta[id_reseguimiento] = clave
     arcpy.AddMessage(f"OTs filtradas: {len(reseg_a_plancheta)}")    
-    
+    if len(reseg_a_plancheta) == 0:
+        arcpy.AddMessage("No se encontraron OTs para las planchetas; se crearán registros de 0 valor por zona.")
+
     # 3) Leer Fugas relacionadas a las OTs filtradas
     if reseg_a_plancheta:
         arcpy.AddMessage("Procesando Fugas...")
@@ -155,18 +170,18 @@ def main():
                     if id_reseguimiento is None:
                         continue
                     id_reseguimiento = str(id_reseguimiento)
-                    id_plancheta = reseg_a_plancheta.get(id_reseguimiento)
-                    if id_plancheta is None:
+                    clave = reseg_a_plancheta.get(id_reseguimiento)
+                    if clave is None:
                         continue
-                    resumen[id_plancheta]["cantidad_fugas"] += 1
+                    resumen[clave]["cantidad_fugas"] += 1
                     # if tiempo_espera in (True, 1, "1", "true", "True", "TRUE"):
-                    #     resumen[id_plancheta]["cantidad_fugas_te"] += 1
-                    resumen[id_plancheta]["cantidad_fugas_te"] += 1 # reemplaza las dos lineas de arriba hasta que se ponga el campo tiempo de espera en la tabla de fugas                    
+                    #     resumen[clave]["cantidad_fugas_te"] += 1
+                    resumen[clave]["cantidad_fugas_te"] += 1 # reemplaza las dos lineas de arriba hasta que se ponga el campo tiempo de espera en la tabla de fugas                    
     
     # 4) Crear tabla de salida en scratchGDB
     arcpy.AddMessage("Creando tabla de salida...")
     scratch_gdb = arcpy.env.scratchGDB
-    nombre_tabla = "resultado_planchetas"
+    nombre_tabla = "reseguimiento_fugas_planchetas"
     tabla_salida = crear_tabla_salida(scratch_gdb, nombre_tabla)
     campos_insert = [
         "ID_PLANCHETA",
@@ -180,11 +195,11 @@ def main():
         "CANT_FUGAS_TE"
     ]
     with arcpy.da.InsertCursor(tabla_salida, campos_insert) as cursor:
-        for id_plancheta in sorted(resumen.keys()):
-            item = resumen[id_plancheta]
+        for id_plancheta, zona_calc in sorted(resumen.keys()):
+            item = resumen[(id_plancheta, zona_calc)]
             cursor.insertRow([
                 id_plancheta,
-                zona,
+                zona_calc,
                 dt_inicio,
                 dt_fin,
                 presion,
