@@ -32,6 +32,23 @@ def obtener_datetime_inicio(fecha):
 def obtener_datetime_fin(fecha):
     return datetime.combine(fecha.date(), time.max)
 
+
+def obtener_codigo_dominio_por_descripcion(feature_class, field_name, domain_name, descripcion):
+    if not descripcion:
+        return None
+    desc = arcpy.Describe(feature_class)
+    gdb = desc.path
+    if not gdb:
+        return None
+
+    for domain in arcpy.da.ListDomains(gdb):
+        if domain.name == domain_name and domain.domainType.lower() in ("coded", "codedvalue"):
+            # domain.codedValues es dict {code: desc}
+            for code, desc_val in domain.codedValues.items():
+                if str(desc_val).strip().lower() == str(descripcion).strip().lower():
+                    return code
+    return None
+
 def chunks(lista, size):
     for i in range(0, len(lista), size):
         yield lista[i:i + size]
@@ -52,6 +69,7 @@ def crear_tabla_salida(workspace, nombre_tabla):
     arcpy.management.CreateTable(carpeta, nombre)
     arcpy.management.AddField(salida, "ID_PLANCHETA", "TEXT", field_length=100)
     arcpy.management.AddField(salida, "ZONA", "TEXT", field_length=50)
+    arcpy.management.AddField(salida, "USUARIO_ASIGNADO_EXTERNO", "TEXT", field_length=100)
     arcpy.management.AddField(salida, "FECHA_INICIO", "DATE")
     arcpy.management.AddField(salida, "FECHA_FIN", "DATE")
     arcpy.management.AddField(salida, "PRESION", "TEXT", field_length=5)
@@ -69,8 +87,9 @@ def main():
     presion = arcpy.GetParameterAsText(1)           # Presion
     fecha_inicio = arcpy.GetParameter(2)            # Fecha_Inicio
     fecha_fin = arcpy.GetParameter(3)               # Fecha_Fin
-    ots_relevadas = arcpy.GetParameter(4)           # OTs_Relevadas
-    fugas = arcpy.GetParameter(5)                   # Fugas    
+    usuario_asignado_externo = arcpy.GetParameterAsText(4)  # Usuario asignado externo (DOMINIO CONTRATISTAS_FUGAS, descripción)
+    ots_relevadas = arcpy.GetParameter(5)           # OTs_Relevadas
+    fugas = arcpy.GetParameter(6)                   # Fugas    
     
     # #----------------------MENSAJE DE LOGEO TEMPORAL--------------------------
     # arcpy.AddMessage("tipo planchetas: " + str(type(planchetas)))
@@ -89,6 +108,13 @@ def main():
         raise ValueError("Fecha Inicio y Fecha Fin son obligatorias.")
     dt_inicio = obtener_datetime_inicio(fecha_inicio)
     dt_fin = obtener_datetime_fin(fecha_fin)
+    usuario_asignado_codigo = None
+    if usuario_asignado_externo:
+        usuario_asignado_codigo = obtener_codigo_dominio_por_descripcion(
+            ots_relevadas, "USUARIO_ASIGNADO_EXTERNO", "CONTRATISTAS_FUGAS", usuario_asignado_externo)
+        if usuario_asignado_codigo is None:
+            # Si no existe en el dominio, podemos asumir que el valor se maneja como texto directo
+            usuario_asignado_codigo = usuario_asignado_externo
     if dt_inicio > dt_fin:
         raise ValueError("Fecha Inicio no puede ser mayor que Fecha Fin.")
     arcpy.AddMessage("Leyendo planchetas seleccionadas...")    
@@ -120,13 +146,13 @@ def main():
     arcpy.AddMessage("Procesando OTs Relevadas...")
     # Mapa: ID_RESEGUIMIENTO -> ID_PLANCHETA
     reseg_a_plancheta = {}
-    campos_ots = ["ID", "ID_PLANCHETA", "CODIGO_LOCALIDAD", "LONGITUD", "FECHA_REL"]
+    campos_ots = ["ID", "ID_PLANCHETA", "CODIGO_LOCALIDAD", "LONGITUD", "FECHA_REL", "USUARIO_ASIGNADO_EXTERNO"]
     
     # Para evitar where muy largo, procesamos las planchetas en bloques
     for bloque_planchetas in chunks(list(planchetas_ids), 200):
         where_ots = sql_in_text("ID_PLANCHETA", bloque_planchetas)
         with arcpy.da.SearchCursor(ots_relevadas, campos_ots, where_clause=where_ots) as cursor:
-            for id_reseguimiento, id_plancheta, codigo_localidad, longitud, fecha_rel in cursor:
+            for id_reseguimiento, id_plancheta, codigo_localidad, longitud, fecha_rel, usuario_asignado_reg in cursor:
                 if id_plancheta is None or id_reseguimiento is None or fecha_rel is None:
                     continue
                 id_plancheta = str(id_plancheta)
@@ -139,6 +165,14 @@ def main():
                 except ValueError:
                     # Ignorar locales que no sean zona comercial/no comercial
                     continue
+
+                # Filtrar por usuario asignado externo si se seleccionó algún valor
+                if usuario_asignado_externo:
+                    if usuario_asignado_reg is None:
+                        continue
+                    if str(usuario_asignado_reg).strip() != str(usuario_asignado_codigo).strip() and \
+                       str(usuario_asignado_reg).strip().lower() != str(usuario_asignado_externo).strip().lower():
+                        continue
 
                 clave = (id_plancheta, zona_actual)
                 if clave not in resumen:
@@ -186,6 +220,7 @@ def main():
     campos_insert = [
         "ID_PLANCHETA",
         "ZONA",
+        "USUARIO_ASIGNADO_EXTERNO",
         "FECHA_INICIO",
         "FECHA_FIN",
         "PRESION",
@@ -200,6 +235,7 @@ def main():
             cursor.insertRow([
                 id_plancheta,
                 zona_calc,
+                usuario_asignado_externo if usuario_asignado_externo else "",
                 dt_inicio,
                 dt_fin,
                 presion,
