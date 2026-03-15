@@ -37,11 +37,20 @@ def obtener_codigo_dominio_por_descripcion(feature_class, field_name, domain_nam
     if not descripcion:
         return None
     desc = arcpy.Describe(feature_class)
-    gdb = desc.path
-    if not gdb:
+
+    # usar workspace en lugar de ruta completa de dataset
+    workspace = getattr(desc, 'workspacePath', None) or getattr(desc, 'path', None) or ''
+    if not workspace and getattr(desc, 'catalogPath', None):
+        workspace = os.path.dirname(desc.catalogPath)
+    if not workspace:
         return None
 
-    for domain in arcpy.da.ListDomains(gdb):
+    try:
+        dominios = arcpy.da.ListDomains(workspace)
+    except Exception:
+        return None
+
+    for domain in dominios:
         if domain.name == domain_name and domain.domainType.lower() in ("coded", "codedvalue"):
             # domain.codedValues es dict {code: desc}
             for code, desc_val in domain.codedValues.items():
@@ -108,6 +117,10 @@ def main():
         raise ValueError("Fecha Inicio y Fecha Fin son obligatorias.")
     dt_inicio = obtener_datetime_inicio(fecha_inicio)
     dt_fin = obtener_datetime_fin(fecha_fin)
+    # Considerar <TODOS> como sin filtro
+    if usuario_asignado_externo and usuario_asignado_externo.strip().upper() == "<TODOS>":
+        usuario_asignado_externo = None
+
     usuario_asignado_codigo = None
     if usuario_asignado_externo:
         usuario_asignado_codigo = obtener_codigo_dominio_por_descripcion(
@@ -115,6 +128,7 @@ def main():
         if usuario_asignado_codigo is None:
             # Si no existe en el dominio, podemos asumir que el valor se maneja como texto directo
             usuario_asignado_codigo = usuario_asignado_externo
+
     if dt_inicio > dt_fin:
         raise ValueError("Fecha Inicio no puede ser mayor que Fecha Fin.")
     arcpy.AddMessage("Leyendo planchetas seleccionadas...")    
@@ -229,13 +243,15 @@ def main():
         "CANT_FUGAS",
         "CANT_FUGAS_TE"
     ]
+    usuario_salida = usuario_asignado_externo if usuario_asignado_externo else "<TODOS>"
+
     with arcpy.da.InsertCursor(tabla_salida, campos_insert) as cursor:
         for id_plancheta, zona_calc in sorted(resumen.keys()):
             item = resumen[(id_plancheta, zona_calc)]
             cursor.insertRow([
                 id_plancheta,
                 zona_calc,
-                usuario_asignado_externo if usuario_asignado_externo else "",
+                usuario_salida,
                 dt_inicio,
                 dt_fin,
                 presion,
